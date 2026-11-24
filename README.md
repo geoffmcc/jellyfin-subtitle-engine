@@ -2,8 +2,6 @@
 
 Standalone extraction of the working Jellyfin Subtitle Engine Version 7.2.
 
-The source code has been separated from Jellyfin Companion. Installation and runtime validation on a standalone Ubuntu workstation are pending.
-
 ## Requirements
 
 ### System requirements
