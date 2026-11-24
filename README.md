@@ -112,9 +112,33 @@ export HF_TOKEN
 
 ## Use
 
-From the project root with the **transcription** environment activated and `HF_TOKEN` set:
+### Activate the transcription environment
 
-### 1. Scan — no transcription, no media writes
+Every time you open a new terminal to run the subtitle engine, go into the project directory and activate the **transcription** virtual environment:
+
+```bash
+cd jellyfin-subtitle-engine
+source .venv/bin/activate
+```
+
+Your shell prompt will typically show `(.venv)`. Verify that the active Python is from the project:
+
+```bash
+which python
+python --version
+```
+
+All queue and installer commands below run from this environment. **Do not activate `.venv-diarization` manually for normal operation.** The engine starts its Python interpreter automatically in a separate subprocess when speaker detection is needed.
+
+If you open a new terminal, activate `.venv` again and set `HF_TOKEN` again before running speaker-aware generation. If CUDA 12 libraries require the `LD_LIBRARY_PATH` setup shown in the installation section, apply that setup again in the new terminal.
+
+To leave the environment later:
+
+```bash
+deactivate
+```
+
+### Scan — no transcription, no media writes
 
 ```bash
 python jellyfin_subtitle_queue.py scan
@@ -122,7 +146,7 @@ python jellyfin_subtitle_queue.py scan
 
 The scan queries the Jellyfin inventory and estimates how many videos are missing English text subtitles. It does not modify media or generated subtitle files.
 
-### 2. Generate one item as an initial test
+### Generate one item as an initial test
 
 ```bash
 python -u jellyfin_subtitle_queue.py run --limit 1
@@ -145,7 +169,7 @@ python jellyfin_subtitle_queue.py status
 python -u jellyfin_subtitle_queue.py run --retry-failed --limit 1
 ```
 
-### 3. Preview subtitle installation
+### Preview subtitle installation
 
 ```bash
 python jellyfin_subtitle_install.py --limit 1
@@ -153,7 +177,7 @@ python jellyfin_subtitle_install.py --limit 1
 
 The installer validates the media mapping and reads the completed queue records. By default, it **previews** what would be created and writes nothing.
 
-### 4. Install completed subtitles
+### Install completed subtitles
 
 After confirming the media paths and the preview:
 
