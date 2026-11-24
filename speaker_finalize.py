@@ -24,6 +24,7 @@ import sqlite3
 import subprocess
 import tempfile
 from pathlib import Path
+from audio_outcomes import NoSpeakerTurns
 from media_paths import media_destination, media_roots
 
 HERE = Path(__file__).resolve().parent
@@ -100,7 +101,7 @@ def get_speakers(video,folder):
         turns=[{'start':float(t.start),'end':float(t.end),'speaker':str(s)}
                for t,_,s in result.exclusive_speaker_diarization.itertracks(yield_label=True)
                if t.end-t.start>=.3]
-        if not turns: raise ValueError('No speech turns detected')
+        if not turns: raise NoSpeakerTurns('No speech turns detected')
         with speakers.open('x',encoding='utf-8') as f:json.dump(turns,f)
         return turns
     finally:
