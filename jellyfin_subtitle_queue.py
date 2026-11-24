@@ -128,137 +128,137 @@ def main():
         p.error('Invalid chunk/overlap')
     OUT.mkdir(parents=True, exist_ok=True)
     # Prevent two independent GPU queue workers from running concurrently.
-    lock_file = (OUT / '.queue.lock').open('a+')
-    try:
-        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        raise SystemExit('A subtitle queue instance is already running.')
-    with database() as db:
-        if args.action == 'status':
-            show_status(db)
-            return
-        if not batch.TOKEN:
-            p.error('Missing Jellyfin API token in .env')
-        print('Scanning Jellyfin inventory...', flush=True)
-        items = list(batch.inventory(batch.user_id()))
-        eligible = sorted(
-            (i for i in items if not batch.english_text_present(i)),
-            key=item_sort_key,
-        )
-        print(f'{len(items)} videos; {len(eligible)} potentially missing English text subtitles.', flush=True)
-        if args.action == 'scan':
-            complete = 0
-            failed = 0
-            skipped = {state: 0 for state in sorted(RETRY_STATES - {'failed'})}
+    with (OUT / '.queue.lock').open('a+') as lock_file:
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise SystemExit('A subtitle queue instance is already running.')
+        with database() as db:
+            if args.action == 'status':
+                show_status(db)
+                return
+            if not batch.TOKEN:
+                p.error('Missing Jellyfin API token in .env')
+            print('Scanning Jellyfin inventory...', flush=True)
+            items = list(batch.inventory(batch.user_id()))
+            eligible = sorted(
+                (i for i in items if not batch.english_text_present(i)),
+                key=item_sort_key,
+            )
+            print(f'{len(items)} videos; {len(eligible)} potentially missing English text subtitles.', flush=True)
+            if args.action == 'scan':
+                complete = 0
+                failed = 0
+                skipped = {state: 0 for state in sorted(RETRY_STATES - {'failed'})}
+                for item in eligible:
+                    row = db.execute('SELECT state FROM jobs WHERE item_id=?', (item['Id'],)).fetchone()
+                    complete += bool(filename(item).is_file() or (row and row['state']=='completed'))
+                    failed += bool(row and row['state']=='failed')
+                    if row and row['state'] in skipped:
+                        skipped[row['state']] += 1
+                print(f'Local finished/tracked: {complete}; failed: {failed}; remaining estimate: {len(eligible)-complete}')
+                print('Non-publication outcomes: ' + ', '.join(f'{k}={v}' for k, v in skipped.items()))
+                print('Read-only Jellyfin scan; generated files unchanged.')
+                return
+            print('V7 mode: publishes only new fully-finalized local SRTs; media remains untouched.', flush=True)
+            pending = []
             for item in eligible:
-                row = db.execute('SELECT state FROM jobs WHERE item_id=?', (item['Id'],)).fetchone()
-                complete += bool(filename(item).is_file() or (row and row['state']=='completed'))
-                failed += bool(row and row['state']=='failed')
-                if row and row['state'] in skipped:
-                    skipped[row['state']] += 1
-            print(f'Local finished/tracked: {complete}; failed: {failed}; remaining estimate: {len(eligible)-complete}')
-            print('Non-publication outcomes: ' + ', '.join(f'{k}={v}' for k, v in skipped.items()))
-            print('Read-only Jellyfin scan; generated files unchanged.')
-            return
-        print('V7 mode: publishes only new fully-finalized local SRTs; media remains untouched.', flush=True)
-        pending = []
-        for item in eligible:
-            dest = filename(item)
-            row = db.execute('SELECT state,srt_path FROM jobs WHERE item_id=?', (item['Id'],)).fetchone()
-            if migrate_completed(db, item, dest, row):
-                continue
-            if dest.is_file():
-                if not row or row['state'] != 'completed':
-                    update(db, item, 'completed', dest=dest)
-                continue
-            if row and row['state'] in RETRY_STATES and not args.retry_failed:
-                continue
-            pending.append((item, dest))
-        max_items = len(pending) if args.all else (args.limit or 3)
-        pending = pending[:max_items]
-        print(f'Pending selected for this run (alphabetical title/series order): {len(pending)}', flush=True)
-        if not pending:
-            show_status(db)
-            return
-        compute = 'float16' if args.device == 'cuda' else 'int8'
-        english = None
-        def english_factory():
-            nonlocal english
-            if english is None:
-                from faster_whisper import WhisperModel
-                print('Loading transcription model...', flush=True)
-                english = WhisperModel('mobiuslabsgmbh/faster-whisper-large-v3-turbo', device=args.device, compute_type=compute)
-            return english
-        translation = None
-        def translator():
-            nonlocal translation
-            if translation is None:
-                from faster_whisper import WhisperModel
-                print('Loading multilingual large-v3 for speech-to-English...', flush=True)
-                translation = WhisperModel('large-v3', device=args.device, compute_type=compute)
-            return translation
-        for idx, (item, dest) in enumerate(pending, 1):
-            print(f'[{idx}/{len(pending)}] {item.get("Type")}: {item.get("Name")}', flush=True)
-            # Database is diagnostic only; all file creation remains guarded.
-            try:
-                if dest.exists():
-                    print(f'  SKIP existing file: {dest}', flush=True)
-                    update(db, item, 'completed', dest=dest)
+                dest = filename(item)
+                row = db.execute('SELECT state,srt_path FROM jobs WHERE item_id=?', (item['Id'],)).fetchone()
+                if migrate_completed(db, item, dest, row):
                     continue
-                update(db, item, 'running', attempt=True)
-                # Generate into an isolated scratch directory. The existing destination
-                # can NEVER be replaced: installation uses exclusive creation.
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                with tempfile.TemporaryDirectory(prefix='subtitle-queue-', dir=OUT) as scratch:
-                    staged = Path(scratch) / dest.name
-                    word_json = Path(scratch) / 'timed-words.json'
-                    captions = batch.convert(item, english, translator, args.chunk_seconds,
-                                             args.overlap, staged, word_output=word_json, english_factory=english_factory)
-                    if captions > 0 and staged.is_file():
-                        # V7 uses original timed words from this SAME transcription:
-                        # no duplicate GPU Whisper pass. Pyannote still runs separately.
-                        print('  Finalizing with V7 before publication...', flush=True)
-                        subprocess.run([
-                            sys.executable, '-u', str(ROOT / 'speaker_auto_finalize.py'),
-                            '--srt', str(staged), '--words', str(word_json),
-                            '--media', item.get('Path') or '', '--item-id', item['Id']
-                        ], cwd=ROOT, check=True)
-                        try:
-                            with dest.open('xb') as output, staged.open('rb') as source:
-                                shutil.copyfileobj(source, output)
-                        except FileExistsError:
-                            print(f'  SKIP existing file appeared: {dest}', flush=True)
-                        except Exception:
-                            # The destination was newly created in this attempt, not an
-                            # existing user file. Keep it for inspection rather than delete.
-                            raise
-                if dest.is_file() and captions > 0:
-                    update(db, item, 'completed', dest=dest, captions=captions)
-                    print(f'  COMPLETED: {captions} captions in {dest}', flush=True)
-                elif not dest.exists():
-                    update(db, item, 'no_speech', captions=0)
-                    print('  NO SPEECH: logged; will not retry unless requested', flush=True)
-                else:
-                    update(db, item, 'failed', error='Unexpected generated file state')
-            except (NoAudio, SilentAudio) as ex:
-                state = 'no_audio' if isinstance(ex, NoAudio) else 'silent_audio'
-                update(db, item, state, captions=0, error=str(ex))
-                print(f'  {state.upper()}: {ex}', flush=True)
-            except subprocess.CalledProcessError as ex:
-                if ex.returncode == NO_SPEAKER_EXIT and isinstance(ex.cmd, list) and str(ROOT / 'speaker_auto_finalize.py') in ex.cmd:
-                    update(db, item, 'no_speaker_turns', error='No speech turns detected')
-                    print('  NO SPEAKER TURNS: draft not published', flush=True)
-                else:
+                if dest.is_file():
+                    if not row or row['state'] != 'completed':
+                        update(db, item, 'completed', dest=dest)
+                    continue
+                if row and row['state'] in RETRY_STATES and not args.retry_failed:
+                    continue
+                pending.append((item, dest))
+            max_items = len(pending) if args.all else (args.limit or 3)
+            pending = pending[:max_items]
+            print(f'Pending selected for this run (alphabetical title/series order): {len(pending)}', flush=True)
+            if not pending:
+                show_status(db)
+                return
+            compute = 'float16' if args.device == 'cuda' else 'int8'
+            english = None
+            def english_factory():
+                nonlocal english
+                if english is None:
+                    from faster_whisper import WhisperModel
+                    print('Loading transcription model...', flush=True)
+                    english = WhisperModel('mobiuslabsgmbh/faster-whisper-large-v3-turbo', device=args.device, compute_type=compute)
+                return english
+            translation = None
+            def translator():
+                nonlocal translation
+                if translation is None:
+                    from faster_whisper import WhisperModel
+                    print('Loading multilingual large-v3 for speech-to-English...', flush=True)
+                    translation = WhisperModel('large-v3', device=args.device, compute_type=compute)
+                return translation
+            for idx, (item, dest) in enumerate(pending, 1):
+                print(f'[{idx}/{len(pending)}] {item.get("Type")}: {item.get("Name")}', flush=True)
+                # Database is diagnostic only; all file creation remains guarded.
+                try:
+                    if dest.exists():
+                        print(f'  SKIP existing file: {dest}', flush=True)
+                        update(db, item, 'completed', dest=dest)
+                        continue
+                    update(db, item, 'running', attempt=True)
+                    # Generate into an isolated scratch directory. The existing destination
+                    # can NEVER be replaced: installation uses exclusive creation.
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    with tempfile.TemporaryDirectory(prefix='subtitle-queue-', dir=OUT) as scratch:
+                        staged = Path(scratch) / dest.name
+                        word_json = Path(scratch) / 'timed-words.json'
+                        captions = batch.convert(item, english, translator, args.chunk_seconds,
+                                                 args.overlap, staged, word_output=word_json, english_factory=english_factory)
+                        if captions > 0 and staged.is_file():
+                            # V7 uses original timed words from this SAME transcription:
+                            # no duplicate GPU Whisper pass. Pyannote still runs separately.
+                            print('  Finalizing with V7 before publication...', flush=True)
+                            subprocess.run([
+                                sys.executable, '-u', str(ROOT / 'speaker_auto_finalize.py'),
+                                '--srt', str(staged), '--words', str(word_json),
+                                '--media', item.get('Path') or '', '--item-id', item['Id']
+                            ], cwd=ROOT, check=True)
+                            try:
+                                with dest.open('xb') as output, staged.open('rb') as source:
+                                    shutil.copyfileobj(source, output)
+                            except FileExistsError:
+                                print(f'  SKIP existing file appeared: {dest}', flush=True)
+                            except Exception:
+                                # The destination was newly created in this attempt, not an
+                                # existing user file. Keep it for inspection rather than delete.
+                                raise
+                    if dest.is_file() and captions > 0:
+                        update(db, item, 'completed', dest=dest, captions=captions)
+                        print(f'  COMPLETED: {captions} captions in {dest}', flush=True)
+                    elif not dest.exists():
+                        update(db, item, 'no_speech', captions=0)
+                        print('  NO SPEECH: logged; will not retry unless requested', flush=True)
+                    else:
+                        update(db, item, 'failed', error='Unexpected generated file state')
+                except (NoAudio, SilentAudio) as ex:
+                    state = 'no_audio' if isinstance(ex, NoAudio) else 'silent_audio'
+                    update(db, item, state, captions=0, error=str(ex))
+                    print(f'  {state.upper()}: {ex}', flush=True)
+                except subprocess.CalledProcessError as ex:
+                    if ex.returncode == NO_SPEAKER_EXIT and isinstance(ex.cmd, list) and str(ROOT / 'speaker_auto_finalize.py') in ex.cmd:
+                        update(db, item, 'no_speaker_turns', error='No speech turns detected')
+                        print('  NO SPEAKER TURNS: draft not published', flush=True)
+                    else:
+                        update(db, item, 'failed', error=f'{type(ex).__name__}: {ex}')
+                        print(f'  FAILED: {type(ex).__name__}: {ex}', file=sys.stderr, flush=True)
+                except KeyboardInterrupt:
+                    update(db, item, 'interrupted', error='User interrupted')
+                    print('Interrupted; queue state saved. Run same command to resume.', flush=True)
+                    return
+                except Exception as ex:
                     update(db, item, 'failed', error=f'{type(ex).__name__}: {ex}')
                     print(f'  FAILED: {type(ex).__name__}: {ex}', file=sys.stderr, flush=True)
-            except KeyboardInterrupt:
-                update(db, item, 'interrupted', error='User interrupted')
-                print('Interrupted; queue state saved. Run same command to resume.', flush=True)
-                return
-            except Exception as ex:
-                update(db, item, 'failed', error=f'{type(ex).__name__}: {ex}')
-                print(f'  FAILED: {type(ex).__name__}: {ex}', file=sys.stderr, flush=True)
-        show_status(db)
+            show_status(db)
 
 
 if __name__ == '__main__':
