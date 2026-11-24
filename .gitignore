@@ -1,0 +1,34 @@
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+*token*
+*secret*
+
+# Python environments and caches
+.venv/
+.venv-*/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Generated media and subtitle data
+subtitles/
+captures/
+*.wav
+*.mp3
+*.mp4
+*.mkv
+*.srt
+*.sqlite
+*.sqlite3
+*.db
+*.onnx
+*.bin
+
+# Local backups and temporary files
+backups/
+*.backup
+*.bak
+*.log
+*.tmp
