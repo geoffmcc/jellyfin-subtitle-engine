@@ -7,7 +7,7 @@ subtitle cue when two distinct speaker turns occur inside it.
 
   python speaker_finalize.py upgrade --limit 1
   python speaker_finalize.py upgrade --all
-  python speaker_finalize.py finalize --srt /path/to/new.srt --media /WD-Black/...
+  python speaker_finalize.py finalize --srt /path/to/new.srt --media /server/media/...
 
 upgrade performs SHA256-guarded installation of improved SRTs only when the
 existing installed file exactly matches the original local file. It saves
@@ -23,13 +23,12 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
-from pathlib import Path, PurePosixPath
+from pathlib import Path
+from media_paths import media_destination, media_roots
 
 HERE = Path(__file__).resolve().parent
 DB = HERE / 'subtitles/batch/subtitle_jobs.sqlite3'
 ROOT = HERE / 'subtitles/speaker-upgrades'
-MOUNT = Path('/mnt/x')
-PREFIX = PurePosixPath('/WD-Black')
 TIMESTAMP = re.compile(r'^(\d\d):(\d\d):(\d\d),(\d{3})$')
 TIME_LINE = re.compile(r'^(\S+)\s+-->\s+(\S+)(?:\s+.*)?$')
 TOKEN = re.compile(r'\S+')
@@ -76,16 +75,10 @@ def render(cues):
 
 
 def media_path(server_path):
-    p=PurePosixPath(server_path)
-    if not p.is_absolute() or '..' in p.parts or not p.is_relative_to(PREFIX):
-        raise ValueError('Only media paths under /WD-Black permitted')
-    relative=p.relative_to(PREFIX)
-    if not relative.parts or p.suffix.lower() not in {'.mkv','.mp4','.avi','.mov','.m4v','.ts','.webm'}:
-        raise ValueError('Not a supported media path')
-    video=MOUNT.joinpath(*relative.parts)
-    if not video.is_file():raise FileNotFoundError(video)
-    return video, video.with_name(video.stem+'.en.srt')
-
+    video, sidecar = media_destination(server_path)
+    if not video.is_file():
+        raise FileNotFoundError(video)
+    return video, sidecar
 
 def get_speakers(video,folder):
     speakers=folder/'speakers.json'
@@ -234,7 +227,7 @@ def run_one(item_id,server_path,src,installed,install):
 
 def upgrade(args):
     if not DB.exists():raise SystemExit(f'Queue DB missing: {DB}')
-    if not (MOUNT/'Media/Video').is_dir():raise SystemExit('Media share unavailable; check /mnt/x')
+    media_roots()  # Validate configured mount before an upgrade run
     uri=f'file:{DB.resolve()}?mode=ro'
     with sqlite3.connect(uri,uri=True) as c:
         c.row_factory=sqlite3.Row
