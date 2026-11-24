@@ -162,6 +162,8 @@ python -u jellyfin_subtitle_queue.py run --all
 
 The queue defaults to three items per run if neither `--all` nor `--limit` is specified.
 
+**Processing order:** Eligible movies and TV series are sorted alphabetically (case-insensitive). Episodes within each TV series are processed by season number, then episode number. Existing completed jobs remain completed, so changing the order does **not** restart transcription or discard the SQLite queue. Episode ordering relies on the season and episode metadata returned by Jellyfin; items missing numbers are placed after numbered episodes within their series.
+
 Review status and optionally retry failures:
 
 ```bash
