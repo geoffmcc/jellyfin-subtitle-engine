@@ -234,3 +234,19 @@ python3 -m unittest discover -s tests -v
 - Dependency snapshots are tied to the original Python/CUDA environment.
 - The system currently expects media files to be locally mountable for diarization and installation.
 - Generated subtitles can contain recognition or speaker-boundary errors; test on one video before a bulk run.
+
+## Temporary audio cleanup
+
+Extracted audio is removed on normal completion, exceptions and ordinary interruption. Forced termination or older releases may leave audio behind. Stop all queue, installer and standalone speaker tools first, then preview the known disposable WAV files:
+
+```bash
+python jellyfin_subtitle_cleanup.py
+```
+
+To remove the listed files after confirming all processing tools are stopped:
+
+```bash
+python jellyfin_subtitle_cleanup.py --apply --offline
+```
+
+The utility takes the queue lock, skips symlinks and only recognizes specific WAV names in item work directories. Legacy standalone speaker tools do not share this lock, so the offline confirmation is required. It does not remove SRTs, manifests, JSON, databases, original media or arbitrary staging directories. Model caches are not included. Keep backups of your workspace as appropriate.
