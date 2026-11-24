@@ -86,24 +86,25 @@ def get_speakers(video,folder):
         return json.loads(speakers.read_text(encoding='utf-8'))
     wav=folder/'audio.wav'
     folder.mkdir(parents=True,exist_ok=True)
-    if not wav.exists():
-        subprocess.run(['ffmpeg','-hide_banner','-loglevel','error','-nostdin','-n',
-                        '-i',str(video),'-vn','-ac','1','-ar','16000','-c:a','pcm_s16le',str(wav)],check=True)
-    import torch
-    from pyannote.audio import Pipeline
-    token=os.environ.get('HF_TOKEN')
-    if not token: raise RuntimeError('HF_TOKEN is missing; export it in this shell')
-    pipeline=Pipeline.from_pretrained('pyannote/speaker-diarization-community-1',token=token)
-    pipeline.to(torch.device('cuda'))
-    result=pipeline(str(wav))
-    turns=[{'start':float(t.start),'end':float(t.end),'speaker':str(s)}
-           for t,_,s in result.exclusive_speaker_diarization.itertracks(yield_label=True)
-           if t.end-t.start>=.3]
-    if not turns: raise ValueError('No speech turns detected')
-    with speakers.open('x',encoding='utf-8') as f:json.dump(turns,f)
-    # This temporary audio exists only in our private work folder.
-    wav.unlink(missing_ok=True)
-    return turns
+    try:
+        if not wav.exists():
+            subprocess.run(['ffmpeg','-hide_banner','-loglevel','error','-nostdin','-n',
+                            '-i',str(video),'-vn','-ac','1','-ar','16000','-c:a','pcm_s16le',str(wav)],check=True)
+        import torch
+        from pyannote.audio import Pipeline
+        token=os.environ.get('HF_TOKEN')
+        if not token: raise RuntimeError('HF_TOKEN is missing; export it in this shell')
+        pipeline=Pipeline.from_pretrained('pyannote/speaker-diarization-community-1',token=token)
+        pipeline.to(torch.device('cuda'))
+        result=pipeline(str(wav))
+        turns=[{'start':float(t.start),'end':float(t.end),'speaker':str(s)}
+               for t,_,s in result.exclusive_speaker_diarization.itertracks(yield_label=True)
+               if t.end-t.start>=.3]
+        if not turns: raise ValueError('No speech turns detected')
+        with speakers.open('x',encoding='utf-8') as f:json.dump(turns,f)
+        return turns
+    finally:
+        wav.unlink(missing_ok=True)
 
 
 def break_cues(cues,turns):
