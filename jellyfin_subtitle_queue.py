@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import jellyfin_subtitle_batch as batch
+from queue_order import item_sort_key
 
 ROOT = Path(__file__).resolve().parent
 OUT = ROOT / 'subtitles' / 'batch'
@@ -139,7 +140,10 @@ def main():
             p.error('Missing Jellyfin API token in .env')
         print('Scanning Jellyfin inventory...', flush=True)
         items = list(batch.inventory(batch.user_id()))
-        eligible = [i for i in items if not batch.english_text_present(i)]
+        eligible = sorted(
+            (i for i in items if not batch.english_text_present(i)),
+            key=item_sort_key,
+        )
         print(f'{len(items)} videos; {len(eligible)} potentially missing English text subtitles.', flush=True)
         if args.action == 'scan':
             complete = 0
@@ -169,7 +173,7 @@ def main():
             pending.append((item, dest))
         max_items = len(pending) if args.all else (args.limit or 3)
         pending = pending[:max_items]
-        print(f'Pending selected for this run: {len(pending)}', flush=True)
+        print(f'Pending selected for this run (alphabetical title/series order): {len(pending)}', flush=True)
         if not pending:
             show_status(db)
             return
