@@ -15,6 +15,7 @@ import re
 import subprocess
 from pathlib import Path
 
+from audio_outcomes import NoSpeakerTurns, NO_SPEAKER_EXIT
 import speaker_finalize as base
 import speaker_sentence as v5
 import speaker_cleanup as v6
@@ -85,13 +86,20 @@ def run(srt: Path, words_file: Path, media: str, item_id: str):
         # Both environments access the same private backup folder. pyannote
         # writes speaker turns and deletes its own intermediate audio.wav.
         code = ('import sys; from pathlib import Path; import speaker_finalize as s; '
-                's.get_speakers(Path(sys.argv[1]),Path(sys.argv[2]))')
+                'from audio_outcomes import NoSpeakerTurns, NO_SPEAKER_EXIT\n'\n                'try: s.get_speakers(Path(sys.argv[1]),Path(sys.argv[2]))\n'\n                'except NoSpeakerTurns: sys.exit(NO_SPEAKER_EXIT)')
         print('  Detecting speaker boundaries (pyannote GPU)...',flush=True)
-        subprocess.run([str(speaker_python),'-u','-c',code,str(video),str(folder)],
-                       cwd=base.HERE, env=env, check=True)
+        try:
+            subprocess.run([str(speaker_python),'-u','-c',code,str(video),str(folder)],
+                           cwd=base.HERE, env=env, check=True)
+        except subprocess.CalledProcessError as exc:
+            if exc.returncode == NO_SPEAKER_EXIT:
+                raise NoSpeakerTurns('No speech turns detected') from exc
+            raise
     turns = json.loads(speaker_path.read_text('utf8'))
     if isinstance(turns,dict):
         turns=turns.get('turns',[])
+    if not turns:
+        raise NoSpeakerTurns('No speech turns detected')
     original_cues=base.parse_srt(source_bytes)
     intermediate,matched,total,candidates,splits = v5.split_cues(original_cues,word_data['words'],turns)
     rate=matched/max(1,total)
@@ -125,6 +133,10 @@ def main():
     ap.add_argument('--media',required=True)
     ap.add_argument('--item-id',required=True)
     a=ap.parse_args()
-    run(Path(a.srt),Path(a.words),a.media,a.item_id)
+    try:
+        run(Path(a.srt),Path(a.words),a.media,a.item_id)
+    except NoSpeakerTurns as exc:
+        print(f'  NO SPEAKER TURNS: {exc}', flush=True)
+        raise SystemExit(NO_SPEAKER_EXIT)
 
 if __name__=='__main__':main()
