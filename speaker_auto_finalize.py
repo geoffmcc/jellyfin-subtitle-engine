@@ -85,8 +85,12 @@ def run(srt: Path, words_file: Path, media: str, item_id: str):
         env.pop('LD_LIBRARY_PATH',None)
         # Both environments access the same private backup folder. pyannote
         # writes speaker turns and deletes its own intermediate audio.wav.
-        code = ('import sys; from pathlib import Path; import speaker_finalize as s; '
-                'from audio_outcomes import NoSpeakerTurns, NO_SPEAKER_EXIT\n'\n                'try: s.get_speakers(Path(sys.argv[1]),Path(sys.argv[2]))\n'\n                'except NoSpeakerTurns: sys.exit(NO_SPEAKER_EXIT)')
+        code = (
+            'import sys; from pathlib import Path; import speaker_finalize as s; '
+            'from audio_outcomes import NoSpeakerTurns, NO_SPEAKER_EXIT\n'
+            'try: s.get_speakers(Path(sys.argv[1]), Path(sys.argv[2]))\n'
+            'except NoSpeakerTurns: sys.exit(NO_SPEAKER_EXIT)'
+        )
         print('  Detecting speaker boundaries (pyannote GPU)...',flush=True)
         try:
             subprocess.run([str(speaker_python),'-u','-c',code,str(video),str(folder)],
