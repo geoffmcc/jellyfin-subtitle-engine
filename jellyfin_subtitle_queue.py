@@ -22,6 +22,7 @@ from pathlib import Path
 
 import jellyfin_subtitle_batch as batch
 from queue_order import item_sort_key
+from audio_outcomes import NoAudio, SilentAudio, NO_SPEAKER_EXIT, RETRY_STATES
 
 ROOT = Path(__file__).resolve().parent
 OUT = ROOT / 'subtitles' / 'batch'
@@ -116,7 +117,7 @@ def main():
     limit = p.add_mutually_exclusive_group()
     limit.add_argument('--limit', type=int, default=None, help='Max videos to process this run (default: 3)')
     limit.add_argument('--all', action='store_true', help='Process all eligible videos; resumable')
-    p.add_argument('--retry-failed', action='store_true', help='Reattempt failed videos')
+    p.add_argument('--retry-failed', action='store_true', help='Reattempt failed and non-speech/audio outcomes')
     p.add_argument('--device', choices=['cuda', 'cpu'], default='cuda')
     p.add_argument('--chunk-seconds', type=int, default=30)
     p.add_argument('--overlap', type=float, default=3)
@@ -148,11 +149,15 @@ def main():
         if args.action == 'scan':
             complete = 0
             failed = 0
+            skipped = {state: 0 for state in sorted(RETRY_STATES - {'failed'})}
             for item in eligible:
                 row = db.execute('SELECT state FROM jobs WHERE item_id=?', (item['Id'],)).fetchone()
                 complete += bool(filename(item).is_file() or (row and row['state']=='completed'))
                 failed += bool(row and row['state']=='failed')
+                if row and row['state'] in skipped:
+                    skipped[row['state']] += 1
             print(f'Local finished/tracked: {complete}; failed: {failed}; remaining estimate: {len(eligible)-complete}')
+            print('Non-publication outcomes: ' + ', '.join(f'{k}={v}' for k, v in skipped.items()))
             print('Read-only Jellyfin scan; generated files unchanged.')
             return
         print('V7 mode: publishes only new fully-finalized local SRTs; media remains untouched.', flush=True)
@@ -166,9 +171,7 @@ def main():
                 if not row or row['state'] != 'completed':
                     update(db, item, 'completed', dest=dest)
                 continue
-            if row and row['state'] == 'failed' and not args.retry_failed:
-                continue
-            if row and row['state'] == 'no_speech' and not args.retry_failed:
+            if row and row['state'] in RETRY_STATES and not args.retry_failed:
                 continue
             pending.append((item, dest))
         max_items = len(pending) if args.all else (args.limit or 3)
@@ -177,14 +180,20 @@ def main():
         if not pending:
             show_status(db)
             return
-        from faster_whisper import WhisperModel
         compute = 'float16' if args.device == 'cuda' else 'int8'
-        print('Loading transcription model...', flush=True)
-        english = WhisperModel('mobiuslabsgmbh/faster-whisper-large-v3-turbo', device=args.device, compute_type=compute)
+        english = None
+        def english_factory():
+            nonlocal english
+            if english is None:
+                from faster_whisper import WhisperModel
+                print('Loading transcription model...', flush=True)
+                english = WhisperModel('mobiuslabsgmbh/faster-whisper-large-v3-turbo', device=args.device, compute_type=compute)
+            return english
         translation = None
         def translator():
             nonlocal translation
             if translation is None:
+                from faster_whisper import WhisperModel
                 print('Loading multilingual large-v3 for speech-to-English...', flush=True)
                 translation = WhisperModel('large-v3', device=args.device, compute_type=compute)
             return translation
@@ -204,7 +213,7 @@ def main():
                     staged = Path(scratch) / dest.name
                     word_json = Path(scratch) / 'timed-words.json'
                     captions = batch.convert(item, english, translator, args.chunk_seconds,
-                                             args.overlap, staged, word_output=word_json)
+                                             args.overlap, staged, word_output=word_json, english_factory=english_factory)
                     if captions > 0 and staged.is_file():
                         # V7 uses original timed words from this SAME transcription:
                         # no duplicate GPU Whisper pass. Pyannote still runs separately.
@@ -231,6 +240,17 @@ def main():
                     print('  NO SPEECH: logged; will not retry unless requested', flush=True)
                 else:
                     update(db, item, 'failed', error='Unexpected generated file state')
+            except (NoAudio, SilentAudio) as ex:
+                state = 'no_audio' if isinstance(ex, NoAudio) else 'silent_audio'
+                update(db, item, state, captions=0, error=str(ex))
+                print(f'  {state.upper()}: {ex}', flush=True)
+            except subprocess.CalledProcessError as ex:
+                if ex.returncode == NO_SPEAKER_EXIT and isinstance(ex.cmd, list) and str(ROOT / 'speaker_auto_finalize.py') in ex.cmd:
+                    update(db, item, 'no_speaker_turns', error='No speech turns detected')
+                    print('  NO SPEAKER TURNS: draft not published', flush=True)
+                else:
+                    update(db, item, 'failed', error=f'{type(ex).__name__}: {ex}')
+                    print(f'  FAILED: {type(ex).__name__}: {ex}', file=sys.stderr, flush=True)
             except KeyboardInterrupt:
                 update(db, item, 'interrupted', error='User interrupted')
                 print('Interrupted; queue state saved. Run same command to resume.', flush=True)
