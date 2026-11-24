@@ -62,59 +62,62 @@ def transcribe(row, folder, original, speaker_file, video):
     word_path = folder/'speaker-v4-words.json'
     if word_path.exists():
         raise SystemExit(f'Already transcribed: {word_path} (use preview).')
-    if not audio.exists():
-        print('Extracting full audio to local workspace (media read-only)...', flush=True)
-        subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin', '-n',
-            '-i', str(video), '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', str(audio)], check=True)
-    duration = audio_length(audio)
-    model = WhisperModel('mobiuslabsgmbh/faster-whisper-large-v3-turbo',
-                         device='cuda', compute_type='float16')
-    temp = folder/'speaker-v4-chunk.wav'
-    if temp.exists(): raise SystemExit(f'Previous temporary chunk exists: {temp}')
-    failed = []
-
-    def read_chunk(start, length, depth=0):
-        if temp.exists(): raise RuntimeError(f'Unexpected file {temp}')
-        try:
+    try:
+        if not audio.exists():
+            print('Extracting full audio to local workspace (media read-only)...', flush=True)
             subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin', '-n',
-                            '-ss', f'{start:.3f}', '-t', f'{length:.3f}', '-i', str(audio),
-                            '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', str(temp)], check=True)
-            segments, _ = model.transcribe(str(temp), language='en', task='transcribe',
-                word_timestamps=True, vad_filter=False, condition_on_previous_text=False,
-                beam_size=5)
-            found = []
-            for segment in segments:
-                for word in segment.words or []:
-                    if word.start is not None and word.end is not None and word.word.strip():
-                        found.append({'start':start+float(word.start),
-                                      'end':start+float(word.end), 'text':word.word})
-            return found
-        except IndexError as exc:
-            if 'boolean index did not match' not in str(exc): raise
-            print(f'Word alignment retry: {start:.1f}-{start+length:.1f}s', flush=True)
-        finally:
-            temp.unlink(missing_ok=True)
-        if depth<3 and length>4.0:
-            half=length/2
-            return read_chunk(start,half,depth+1)+read_chunk(start+half,length-half,depth+1)
-        failed.append([round(start,3),round(start+length,3)])
-        return []
+                '-i', str(video), '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', str(audio)], check=True)
+        duration = audio_length(audio)
+        model = WhisperModel('mobiuslabsgmbh/faster-whisper-large-v3-turbo',
+                             device='cuda', compute_type='float16')
+        temp = folder/'speaker-v4-chunk.wav'
+        if temp.exists(): raise SystemExit(f'Previous temporary chunk exists: {temp}')
+        failed = []
 
-    all_words=[]
-    print('GPU word-timestamp transcription (original SRT text will be retained)...', flush=True)
-    for second in range(0,int(duration)+1,30):
-        if second>=duration: break
-        all_words.extend(read_chunk(float(second),min(30.,duration-second)))
-        if (second//30+1)%10==0:
-            print(f'  {min(second+30,duration):.0f}/{duration:.0f}s, {len(all_words)} words',flush=True)
-    if not all_words:raise SystemExit('No transcribed words; no result saved.')
-    # File x preserves previous results in case of accidental rerun.
-    with word_path.open('x',encoding='utf8') as f:
-        json.dump({'words':all_words,'failed_ranges':failed,
-                   'audio_duration':duration},f,ensure_ascii=False)
-    print(f'Created {word_path}; words={len(all_words)}; failed_ranges={len(failed)}')
-    if failed: print('WARNING: Some intervals lack real word timings; previews will avoid unanchored splits.')
-    # Keep audio for debugging until user approves cleanup.
+        def read_chunk(start, length, depth=0):
+            if temp.exists(): raise RuntimeError(f'Unexpected file {temp}')
+            try:
+                subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin', '-n',
+                                '-ss', f'{start:.3f}', '-t', f'{length:.3f}', '-i', str(audio),
+                                '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', str(temp)], check=True)
+                segments, _ = model.transcribe(str(temp), language='en', task='transcribe',
+                    word_timestamps=True, vad_filter=False, condition_on_previous_text=False,
+                    beam_size=5)
+                found = []
+                for segment in segments:
+                    for word in segment.words or []:
+                        if word.start is not None and word.end is not None and word.word.strip():
+                            found.append({'start':start+float(word.start),
+                                          'end':start+float(word.end), 'text':word.word})
+                return found
+            except IndexError as exc:
+                if 'boolean index did not match' not in str(exc): raise
+                print(f'Word alignment retry: {start:.1f}-{start+length:.1f}s', flush=True)
+            finally:
+                temp.unlink(missing_ok=True)
+            if depth<3 and length>4.0:
+                half=length/2
+                return read_chunk(start,half,depth+1)+read_chunk(start+half,length-half,depth+1)
+            failed.append([round(start,3),round(start+length,3)])
+            return []
+
+        all_words=[]
+        print('GPU word-timestamp transcription (original SRT text will be retained)...', flush=True)
+        for second in range(0,int(duration)+1,30):
+            if second>=duration: break
+            all_words.extend(read_chunk(float(second),min(30.,duration-second)))
+            if (second//30+1)%10==0:
+                print(f'  {min(second+30,duration):.0f}/{duration:.0f}s, {len(all_words)} words',flush=True)
+        if not all_words:raise SystemExit('No transcribed words; no result saved.')
+        # File x preserves previous results in case of accidental rerun.
+        with word_path.open('x',encoding='utf8') as f:
+            json.dump({'words':all_words,'failed_ranges':failed,
+                       'audio_duration':duration},f,ensure_ascii=False)
+        print(f'Created {word_path}; words={len(all_words)}; failed_ranges={len(failed)}')
+        if failed: print('WARNING: Some intervals lack real word timings; previews will avoid unanchored splits.')
+    finally:
+        audio.unlink(missing_ok=True)
+
 
 
 def align(cues, whisper):
