@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Install completed Jellyfin Companion subtitles without overwriting anything.
+"""Install completed Jellyfin Subtitle Engine files without overwriting anything.
 
-Read-only by default. Requires Windows X: share mounted in WSL at /mnt/x.
+Read-only by default. Configure MEDIA_SERVER_ROOT and MEDIA_MOUNT_ROOT.
 Only creates matching *.en.srt sidecars; never deletes or edits existing files.
 This script can run while subtitle queue generation continues.
 """
@@ -11,26 +11,12 @@ import argparse
 import os
 import sqlite3
 import sys
-from pathlib import Path, PurePosixPath
+from pathlib import Path
+from media_paths import media_destination, media_roots
 
 HERE = Path(__file__).resolve().parent
 DB = HERE / 'subtitles' / 'batch' / 'subtitle_jobs.sqlite3'
 LOCAL = HERE / 'subtitles' / 'batch'
-SERVER_PREFIX = PurePosixPath('/WD-Black')
-MOUNT = Path('/mnt/x')
-VIDEO_EXTENSIONS = {'.mp4', '.mkv', '.avi', '.mov', '.m4v', '.ts', '.webm'}
-
-
-def media_destination(media_path: str) -> tuple[Path, Path]:
-    """Map only Jellyfin paths under /WD-Black to /mnt/x."""
-    p = PurePosixPath(media_path)
-    if not p.is_absolute() or '..' in p.parts or not p.is_relative_to(SERVER_PREFIX):
-        raise ValueError('Not a valid /WD-Black media path')
-    rel = p.relative_to(SERVER_PREFIX)
-    if not rel.parts or p.suffix.lower() not in VIDEO_EXTENSIONS:
-        raise ValueError('Not a supported video path')
-    movie = MOUNT.joinpath(*rel.parts)
-    return movie, movie.with_name(movie.stem + '.en.srt')
 
 
 def candidate(row: sqlite3.Row):
@@ -82,8 +68,10 @@ def main():
         parser.error('--limit must be >= 0')
     if not DB.is_file():
         parser.error(f'Queue database not found: {DB}')
-    if not (MOUNT / 'Media' / 'Video').is_dir():
-        parser.error(f'Media share missing at {MOUNT}/Media/Video; mount Windows X: first')
+    try:
+        media_roots()
+    except (RuntimeError, ValueError, OSError) as exc:
+        parser.error(str(exc))
     print('INSTALL MODE: CREATE NEW .en.srt FILES ONLY' if args.install else 'PREVIEW ONLY: NO FILES WILL BE WRITTEN', flush=True)
     # Open database read-only so the transcription process remains independent.
     uri = f'file:{DB.as_posix()}?mode=ro'
