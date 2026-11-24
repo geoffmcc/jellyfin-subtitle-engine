@@ -21,6 +21,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from config import read_env
+from audio_outcomes import NoAudio, SilentAudio, check_pcm_audio
 
 for k, v in read_env().items():
     os.environ.setdefault(k, v)
@@ -115,15 +116,30 @@ def make_clip(audio, clip, start, end):
         dst.writeframes(frames)
 
 
-def convert(item, english_model, translation_model, chunk_seconds, overlap, dest, word_output=None):
+def probe_audio(source, auth):
+    result = subprocess.run(['ffprobe', '-v', 'error', '-headers', auth,
+                             '-select_streams', 'a:0', '-show_entries', 'stream=index',
+                             '-of', 'json', source], check=True, capture_output=True, text=True)
+    streams = json.loads(result.stdout)['streams']
+    if not isinstance(streams, list):
+        raise ValueError('Invalid ffprobe stream response')
+    if not streams:
+        raise NoAudio('Media has no audio stream')
+
+
+def convert(item, english_model, translation_model, chunk_seconds, overlap, dest, word_output=None, *, english_factory=None):
     source = SERVER + f'/Items/{item["Id"]}/File'
     auth = f'Authorization: MediaBrowser Token="{TOKEN}"\r\n'
+    probe_audio(source, auth)
     with tempfile.TemporaryDirectory(prefix='jellyfin-batch-srt-') as tmp:
         audio, clip = Path(tmp) / 'audio.wav', Path(tmp) / 'clip.wav'
         command = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin',
                    '-headers', auth, '-i', source, '-map', '0:a:0',
                    '-vn', '-ac', '1', '-ar', '16000', '-acodec', 'pcm_s16le', '-y', str(audio)]
         subprocess.run(command, check=True)
+        check_pcm_audio(audio)
+        if english_factory is not None:
+            english_model = english_factory()
         with wave.open(str(audio), 'rb') as f:
             duration = f.getnframes() / f.getframerate()
         records = []
@@ -292,6 +308,9 @@ def main():
             try:
                 count = convert(item, model, translator, args.chunk_seconds, args.overlap, target)
                 print(f'  saved {count} captions: {target}', flush=True)
+            except (NoAudio, SilentAudio) as exc:
+                print(f'  SKIP: {exc}', flush=True)
+                continue
             except Exception as exc:
                 errors += 1
                 print(f'  FAILED: {type(exc).__name__}: {exc}', file=sys.stderr)
