@@ -17,6 +17,7 @@ from media_paths import media_destination, media_roots
 HERE = Path(__file__).resolve().parent
 DB = HERE / 'subtitles' / 'batch' / 'subtitle_jobs.sqlite3'
 LOCAL = HERE / 'subtitles' / 'batch'
+STATE_DB = LOCAL / 'subtitle_install_state.sqlite3'
 
 
 def candidate(row: sqlite3.Row):
@@ -59,10 +60,49 @@ def exclusive_copy(source: Path, destination: Path):
         raise OSError('Written byte count differs from source size; inspect destination')
 
 
+
+def open_state(writable: bool) -> sqlite3.Connection:
+    """Separate bookkeeping DB; never modify the transcription queue database."""
+    if writable:
+        db = sqlite3.connect(STATE_DB, timeout=15)
+    elif STATE_DB.exists():
+        return sqlite3.connect(f'file:{STATE_DB.as_posix()}?mode=ro', uri=True, timeout=15)
+    else:
+        db = sqlite3.connect(':memory:')
+    db.execute('''CREATE TABLE IF NOT EXISTS handled (
+        item_id TEXT PRIMARY KEY,
+        updated_at TEXT NOT NULL,
+        media_path TEXT NOT NULL,
+        srt_path TEXT NOT NULL
+    )''')
+    db.commit()
+    return db
+
+
+def already_handled(db: sqlite3.Connection, row: sqlite3.Row) -> bool:
+    record = db.execute(
+        'SELECT 1 FROM handled WHERE item_id=? AND updated_at=? AND media_path=? AND srt_path=?',
+        (row['item_id'], row['updated_at'], row['media_path'], row['srt_path'])
+    ).fetchone()
+    return record is not None
+
+
+def mark_handled(db: sqlite3.Connection, row: sqlite3.Row) -> None:
+    db.execute('''INSERT INTO handled(item_id, updated_at, media_path, srt_path)
+                  VALUES (?, ?, ?, ?)
+                  ON CONFLICT(item_id) DO UPDATE SET
+                    updated_at=excluded.updated_at,
+                    media_path=excluded.media_path,
+                    srt_path=excluded.srt_path''',
+               (row['item_id'], row['updated_at'], row['media_path'], row['srt_path']))
+    db.commit()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--install', action='store_true', help='Actually create missing .en.srt sidecars (default: preview only)')
-    parser.add_argument('--limit', type=int, default=10, help='Maximum completed jobs to examine (default 10, 0=all)')
+    parser.add_argument('--limit', type=int, default=10, help='Maximum unhandled completed jobs to examine (default 10, 0=all)')
+    parser.add_argument('--recheck', action='store_true', help='Recheck previously handled jobs (e.g. if subtitles were removed)')
     args = parser.parse_args()
     if args.limit < 0:
         parser.error('--limit must be >= 0')
@@ -73,30 +113,40 @@ def main():
     except (RuntimeError, ValueError, OSError) as exc:
         parser.error(str(exc))
     print('INSTALL MODE: CREATE NEW .en.srt FILES ONLY' if args.install else 'PREVIEW ONLY: NO FILES WILL BE WRITTEN', flush=True)
-    # Open database read-only so the transcription process remains independent.
+    # The transcription database remains read-only; installation state is separate.
     uri = f'file:{DB.as_posix()}?mode=ro'
-    counts = dict(installable=0, exists=0, errors=0, installed=0)
-    with sqlite3.connect(uri, uri=True, timeout=15) as conn:
+    counts = dict(installable=0, exists=0, errors=0, installed=0, previously_handled=0)
+    examined = 0
+    with sqlite3.connect(uri, uri=True, timeout=15) as conn, open_state(args.install) as state:
         conn.row_factory = sqlite3.Row
-        sql = "SELECT item_id,title,media_path,srt_path FROM jobs WHERE state='completed' ORDER BY updated_at,item_id"
-        if args.limit:
-            sql += f' LIMIT {args.limit:d}'
+        sql = ("SELECT item_id,title,media_path,srt_path,updated_at FROM jobs "
+               "WHERE state='completed' ORDER BY updated_at,item_id")
         for row in conn.execute(sql):
+            if not args.recheck and already_handled(state, row):
+                counts['previously_handled'] += 1
+                continue
+            if args.limit and examined >= args.limit:
+                break
+            examined += 1
             try:
                 src, video, dest = candidate(row)
                 if dest.exists():
                     counts['exists'] += 1
                     print(f'EXISTS:  {dest} (unchanged)')
+                    if args.install:
+                        mark_handled(state, row)
                     continue
                 counts['installable'] += 1
-                print(f'{"INSTALL" if args.install else "WOULD CREATE"}: {dest}\n  FROM: {src}', flush=True)
+                print(f'{"INSTALL" if args.install else "WOULD CREATE"}: {dest}\\n  FROM: {src}', flush=True)
                 if args.install:
                     try:
                         exclusive_copy(src, dest)
                         counts['installed'] += 1
+                        mark_handled(state, row)
                         print('  CREATED successfully', flush=True)
                     except FileExistsError:
                         counts['exists'] += 1
+                        mark_handled(state, row)
                         print('  SKIPPED: file appeared before copy', flush=True)
                     except Exception as err:
                         counts['errors'] += 1
@@ -104,9 +154,10 @@ def main():
             except Exception as err:
                 counts['errors'] += 1
                 print(f'SKIP {row["title"]}: {err}', file=sys.stderr, flush=True)
-    print('Summary: ' + ', '.join(f'{k}={v}' for k, v in counts.items()), flush=True)
+    print('Summary: ' + ', '.join(f'{k}={v}' for k, v in counts.items()) + f', examined={examined}', flush=True)
     if not args.install:
         print('Preview only. Use --install --limit 1 to install the first eligible subtitle.')
+
 
 if __name__ == '__main__':
     main()

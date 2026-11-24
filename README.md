@@ -175,7 +175,7 @@ python -u jellyfin_subtitle_queue.py run --retry-failed --limit 1
 python jellyfin_subtitle_install.py --limit 1
 ```
 
-The installer validates the media mapping and reads the completed queue records. By default, it **previews** what would be created and writes nothing.
+The installer validates the media mapping and reads the completed queue records. By default, it **previews** what would be created and writes nothing. With installation enabled, it also remembers handled jobs in a separate local SQLite database so later runs skip repeated `EXISTS` checks.
 
 ### Install completed subtitles
 
@@ -193,6 +193,16 @@ python jellyfin_subtitle_install.py --install --limit 0
 
 The installer only creates missing `.en.srt` files with exclusive creation. It will not intentionally overwrite an existing sidecar, but a partially written new file can remain if the copy fails; inspect errors before retrying.
 
+Installer state is stored in `subtitles/batch/subtitle_install_state.sqlite3`, separately from the transcription queue database. A job is marked handled only after an installation succeeds or its subtitle already exists. Preview mode does not mark any jobs handled. The `--limit` option now limits **unhandled** jobs examined, so new jobs are not starved behind previously installed ones.
+
+If subtitles are removed or you need to verify previously handled jobs again, use `--recheck` (possibly with `--limit 0` to inspect all). This deliberately repeats the media checks:
+
+```bash
+python jellyfin_subtitle_install.py --recheck --limit 0
+```
+
+The state database is a local optimization, not an authoritative proof that a sidecar still exists. Avoid running multiple installers simultaneously.
+
 ### Optional queue settings
 
 - `--device cuda|cpu` — selects the Faster-Whisper device (the speaker stage still uses CUDA)
@@ -203,7 +213,7 @@ The installer only creates missing `.en.srt` files with exclusive creation. It w
 
 ## Files and privacy
 
-Generated subtitles, job records and intermediate diarization artifacts live under `subtitles/` and are excluded from Git. The queue database is `subtitles/batch/subtitle_jobs.sqlite3`.
+Generated subtitles, job records and intermediate diarization artifacts live under `subtitles/` and are excluded from Git. The queue database is `subtitles/batch/subtitle_jobs.sqlite3`; installer bookkeeping is kept in `subtitles/batch/subtitle_install_state.sqlite3`.
 
 The tool processes audio locally with downloaded speech models, but it **does** contact Jellyfin and uses Hugging Face for model downloads/authentication. Do not commit `.env`, `HF_TOKEN`, SRTs, database files, transcripts or media. Logs may include video titles and local media paths; review them before sharing publicly.
 
