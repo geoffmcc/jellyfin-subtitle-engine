@@ -1,125 +1,108 @@
 # Jellyfin Subtitle Engine
 
-GPU-accelerated subtitle generation for Jellyfin using Faster-Whisper, Pyannote speaker diarization, word-level alignment, and automatic SRT installation.
+Generate English subtitles for Jellyfin movies and TV episodes using Faster-Whisper transcription, optional speech-to-English translation, and pyannote speaker-aware refinement. A resumable SQLite queue keeps track of work and a separate installer creates `.en.srt` sidecars without overwriting existing files.
 
-Jellyfin Subtitle Engine scans your media library for videos missing English text subtitles, generates new subtitles, refines subtitle boundaries around speaker changes, and optionally installs the resulting `.en.srt` files alongside your media.
+> **Early standalone release:** Extracted from a working Ubuntu/WSL2 pipeline. The standalone installation and pinned dependency snapshots have **not** been validated on a fresh machine. Test with one item before processing your library.
 
 ## Features
 
-- **Automatic transcription** using Faster-Whisper and NVIDIA GPU acceleration
-- **Speech translation** to English for non-English audio
-- **Speaker diarization** using Pyannote to detect speaker changes
-- **Word-level timestamps** for more accurate subtitle timing
-- **Speaker-aware refinement** to improve dialogue separation
-- **Resumable processing queue** with SQLite job tracking
-- **Safe subtitle installation** that avoids overwriting existing subtitle files
-- **Read-only library scanning** to identify missing English subtitles
+- Find Jellyfin movies and episodes lacking detected English **text** subtitles
+- Transcribe English speech; translate recognized non-English speech to English
+- Timestamp words and refine subtitle boundaries around detected speaker changes
+- Save finalized SRTs locally before installation
+- Track completed, failed and interrupted jobs in SQLite; resume without redoing completed jobs
+- Preview installation before writing; create sidecar files only if they do not exist
 
-## Project Status
-
-The current implementation is based on Version 7.2 of an actively used subtitle-processing pipeline originally developed under Ubuntu in WSL2.
-
-The standalone code has been extracted, but installation and runtime behavior have not yet been validated on a fresh Linux machine.
-
-**Important:** The current installer and speaker-processing modules still contain media-path mappings specific to the original environment. These must be adapted before using the project on a different system.
+Existing English subtitle detection depends on Jellyfin's media-stream metadata, which can be incomplete. Generated captions and speaker identification may require manual review.
 
 ## Requirements
 
-### System requirements
+- Linux; developed with **Python 3.14** in Ubuntu on WSL2
+- FFmpeg (including `ffprobe`) installed and on `PATH`
+- Access to a Jellyfin server and a valid Jellyfin API token
+- An NVIDIA GPU with compatible drivers for the **complete** speaker-aware pipeline
+- Hugging Face token with accepted access terms for `pyannote/speaker-diarization-community-1`
+- Local access to the media files **through a mounted directory**, for speaker diarization and optional subtitle installation
 
-- Linux (developed under Ubuntu/WSL2)
-- Python 3.14
-- FFmpeg and FFprobe
-- NVIDIA GPU with compatible drivers and CUDA support
-- Jellyfin server with API access
-- Hugging Face account and access token for Pyannote
+The included Python dependency lists are snapshots of two working WSL environments, **not guaranteed portable lockfiles**.
 
-### Python dependencies
+| Environment | Role | Core packages |
+| --- | --- | --- |
+| `.venv` | Subtitle queue and Faster-Whisper | `faster-whisper==1.2.1`, `ctranslate2==4.9.1`, CUDA 12 libraries |
+| `.venv-diarization` | Pyannote subprocess | `pyannote-audio==4.1.1`, PyTorch, CUDA 13 libraries |
 
-Two separate Python virtual environments are used to isolate potentially conflicting dependencies.
+Both environments are required for the full pipeline. `--device cpu` changes only Faster-Whisper; **pyannote is still hardcoded to CUDA**.
 
-| Environment | Primary components |
-|---|---|
-| `.venv` | Faster-Whisper 1.2.1, CTranslate2 4.9.1, CUDA 12 libraries |
-| `.venv-diarization` | Pyannote Audio 4.1.1, PyTorch, Torchaudio, CUDA 13 libraries |
+## Install
 
-Dependency snapshots are provided in `requirements-transcription.txt` and `requirements-diarization.txt`. These reflect the original working installation and are not yet verified as portable dependency locks.
-
-## Installation
-
-### 1. Clone the repository
+Clone the source:
 
 ```bash
 git clone https://github.com/geoffmcc/jellyfin-subtitle-engine.git
 cd jellyfin-subtitle-engine
 ```
 
-### 2. Install system dependencies
-
-On Ubuntu:
+On Ubuntu, install FFmpeg and Python virtual-environment support (and make sure the correct NVIDIA drivers are already configured):
 
 ```bash
 sudo apt update
-sudo apt install -y ffmpeg python3-venv
-```
-
-Verify:
-
-```bash
+sudo apt install ffmpeg python3-venv
 python3 --version
 ffmpeg -version
 nvidia-smi
 ```
 
-Ensure the Python interpreter is compatible with the provided requirements and NVIDIA GPU drivers are installed correctly.
-
-### 3. Create the transcription environment
+Create the two Python environments, using a compatible Python 3.14 interpreter:
 
 ```bash
 python3 -m venv .venv
-source .venv/bin/activate
-
-python -m pip install -r requirements-transcription.txt
-```
-
-### 4. Create the diarization environment
-
-```bash
-deactivate
+.venv/bin/python -m pip install -r requirements-transcription.txt
 
 python3 -m venv .venv-diarization
-.venv-diarization/bin/python -m pip install \
-  -r requirements-diarization.txt
+.venv-diarization/bin/python -m pip install -r requirements-diarization.txt
 ```
 
-Dependency installation may require platform-specific adjustments. The existing dependency snapshots have not been verified on a fresh Ubuntu installation.
+**Compatibility note:** These are environment snapshots from the original WSL setup; installation may fail on another Python/CUDA combination. Resolve those issues before running the application. The two CUDA runtime generations must remain isolated as configured.
 
-## Configuration
+For Faster-Whisper, the original CUDA 12 environment needed the Python-packaged cuBLAS and cuDNN libraries on the dynamic loader path. Activate the transcription environment and set the paths if your installation needs them:
 
-### 1. Configure Jellyfin
+```bash
+source .venv/bin/activate
+export LD_LIBRARY_PATH="$VIRTUAL_ENV/lib/python3.14/site-packages/nvidia/cublas/lib:$VIRTUAL_ENV/lib/python3.14/site-packages/nvidia/cudnn/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+```
 
-Create your local configuration:
+The speaker subprocess deliberately removes `LD_LIBRARY_PATH` so its separate environment can load its own libraries. Adapt the paths if your venv layout differs.
+
+## Configure Jellyfin and the media mount
+
+Copy the example configuration and restrict its permissions:
 
 ```bash
 cp .env.example .env
 chmod 600 .env
 ```
 
-Edit `.env`:
+Fill in your own values in `.env`:
 
 ```dotenv
-JELLYFIN_URL=http://your-jellyfin-server:8096
-JELLYFIN_TOKEN=your-api-token
-JELLYFIN_USER_ID=your-user-id
+JELLYFIN_URL=http://jellyfin.example:8096
+JELLYFIN_TOKEN=your-own-api-token
+JELLYFIN_USER_ID=your-jellyfin-user-id
+
+MEDIA_SERVER_ROOT=/srv/media
+MEDIA_MOUNT_ROOT=/mnt/media
 ```
 
-An appropriate Jellyfin API token is required.
+**Media path mapping is important.** `MEDIA_SERVER_ROOT` is the prefix in video paths reported by the **Jellyfin server**, while `MEDIA_MOUNT_ROOT` is the corresponding media directory **as seen by the machine running this engine**. For example:
 
-### 2. Configure Hugging Face
+- Jellyfin reports: `/srv/media/Shows/Example/Episode.mkv`
+- This machine sees: `/mnt/media/Shows/Example/Episode.mkv`
 
-Speaker diarization uses the `pyannote/speaker-diarization-community-1` model.
+Both roots must be **absolute** and preserve the same relative folders. The local media mount must exist. The engine validates that mapped files remain within the configured mount, including symlinks. The mount needs read access for speaker detection; subtitle installation additionally needs permission to create sidecar files.
 
-Ensure you have accepted its Hugging Face model access conditions, then set your access token:
+Set `JELLYFIN_USER_ID` explicitly for predictable library selection. If omitted, the code uses Jellyfin session discovery (optionally preferring `JELLYFIN_TV`), which may select an unintended user's library.
+
+A Hugging Face access token is also required for speaker diarization. After accepting the terms for [pyannote/speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1), provide it **in the running shell**, not in source code:
 
 ```bash
 read -rs 'HF_TOKEN?Hugging Face token: '
@@ -127,142 +110,91 @@ echo
 export HF_TOKEN
 ```
 
-The token must be available to the process that runs subtitle generation.
+## Use
 
-### 3. Configure media paths
+From the project root with the **transcription** environment activated and `HF_TOKEN` set:
 
-The current code expects the Jellyfin server's media paths to be accessible through a local mounted media directory.
-
-Before enabling processing, review the path mappings in:
-
-- `speaker_finalize.py`
-- `jellyfin_subtitle_install.py`
-
-These files currently contain environment-specific path assumptions. A future update will move these settings into the application's configuration.
-
-## Usage
-
-Activate the transcription environment before running the commands:
-
-```bash
-source .venv/bin/activate
-```
-
-### Scan the Jellyfin library
-
-Identify videos that may need English subtitles without generating new files:
+### 1. Scan — no transcription, no media writes
 
 ```bash
 python jellyfin_subtitle_queue.py scan
 ```
 
-### View processing status
+The scan queries the Jellyfin inventory and estimates how many videos are missing English text subtitles. It does not modify media or generated subtitle files.
 
-```bash
-python jellyfin_subtitle_queue.py status
-```
-
-### Generate subtitles
-
-Process up to three eligible videos (the default limit):
-
-```bash
-python -u jellyfin_subtitle_queue.py run
-```
-
-Process one video:
+### 2. Generate one item as an initial test
 
 ```bash
 python -u jellyfin_subtitle_queue.py run --limit 1
 ```
 
-Process all remaining eligible videos:
+This downloads/extracts audio, generates a draft SRT and word timestamps, runs the pyannote speaker-analysis subprocess, and finalizes a local SRT. **This stage does not install the result into the media library.** The GPU and mounted media access must both work.
+
+After confirming the result, process more items:
 
 ```bash
 python -u jellyfin_subtitle_queue.py run --all
 ```
 
-The queue records progress in SQLite and skips completed jobs when restarted.
+The queue defaults to three items per run if neither `--all` nor `--limit` is specified.
 
-Retry previously failed jobs:
-
-```bash
-python -u jellyfin_subtitle_queue.py run \
-  --retry-failed --limit 1
-```
-
-### CPU transcription
-
-The transcription queue also supports CPU inference:
+Review status and optionally retry failures:
 
 ```bash
-python -u jellyfin_subtitle_queue.py run \
-  --device cpu --limit 1
+python jellyfin_subtitle_queue.py status
+python -u jellyfin_subtitle_queue.py run --retry-failed --limit 1
 ```
 
-**Note:** This option changes the Faster-Whisper device only. The current Pyannote speaker-processing stage still requires CUDA, so it does not provide a fully CPU-only workflow.
-
-## Installing subtitles
-
-Generated subtitles are first saved locally beneath:
-
-```text
-subtitles/batch/by-item/
-```
-
-They are not automatically written into your media library by the queue.
-
-Once the media-path mapping has been correctly configured, preview installation:
+### 3. Preview subtitle installation
 
 ```bash
 python jellyfin_subtitle_install.py --limit 1
 ```
 
-Install the first eligible subtitle:
+The installer validates the media mapping and reads the completed queue records. By default, it **previews** what would be created and writes nothing.
+
+### 4. Install completed subtitles
+
+After confirming the media paths and the preview:
 
 ```bash
 python jellyfin_subtitle_install.py --install --limit 1
 ```
 
-Install all completed subtitles:
+To examine and install all completed subtitle jobs:
 
 ```bash
 python jellyfin_subtitle_install.py --install --limit 0
 ```
 
-The installer creates `.en.srt` sidecar files alongside their corresponding videos.
+The installer only creates missing `.en.srt` files with exclusive creation. It will not intentionally overwrite an existing sidecar, but a partially written new file can remain if the copy fails; inspect errors before retrying.
 
-**Existing subtitle files are not overwritten.** The installer uses exclusive file creation to avoid replacing existing files.
+### Optional queue settings
 
-## Processing and Data
+- `--device cuda|cpu` — selects the Faster-Whisper device (the speaker stage still uses CUDA)
+- `--chunk-seconds N` — transcription chunk length (minimum 20 seconds)
+- `--overlap N` — seconds of chunk overlap (0–10)
+- `--retry-failed` — reattempt failed or no-speech jobs
+- `--limit N` or `--all` — number of videos to process
 
-The application maintains local processing data under `subtitles/`, including:
+## Files and privacy
 
-- SQLite job records
-- Generated subtitle files
-- Speaker-detection results
-- Word-timing information
-- Intermediate processing artifacts and backups
+Generated subtitles, job records and intermediate diarization artifacts live under `subtitles/` and are excluded from Git. The queue database is `subtitles/batch/subtitle_jobs.sqlite3`.
 
-These files are excluded from Git version control.
+The tool processes audio locally with downloaded speech models, but it **does** contact Jellyfin and uses Hugging Face for model downloads/authentication. Do not commit `.env`, `HF_TOKEN`, SRTs, database files, transcripts or media. Logs may include video titles and local media paths; review them before sharing publicly.
 
-## Known Limitations
+## Development tests
 
-- Standalone installation has not yet been validated on a fresh Ubuntu system.
-- Some media paths remain hardcoded and require configuration changes.
-- Speaker diarization currently requires CUDA.
-- Two separate Python environments are required.
-- Installation dependencies reflect the original development environment.
-- Subtitle quality depends on audio clarity, language detection, word alignment, and speaker-detection accuracy.
+Media-path checks need no GPU, Jellyfin instance or extra packages:
 
-## Privacy and Safety
+```bash
+python3 -m unittest discover -s tests -v
+```
 
-The project communicates with a configured Jellyfin server and processes media audio locally using its installed speech models.
+## Current limitations
 
-Jellyfin credentials, Hugging Face tokens, generated subtitle files, and processing databases should not be committed to source control.
-
-Always verify the media-path configuration and perform a preview before enabling subtitle installation.
-
-## Development
-
-The project is under active development. Planned improvements include portable media-path configuration, reproducible installation, automated testing, and improved speaker-change detection.
+- The standalone install is not yet verified on a clean Linux machine.
+- Full speaker-aware processing requires a CUDA-capable NVIDIA GPU; CPU-only mode is incomplete.
+- Dependency snapshots are tied to the original Python/CUDA environment.
+- The system currently expects media files to be locally mountable for diarization and installation.
+- Generated subtitles can contain recognition or speaker-boundary errors; test on one video before a bulk run.
