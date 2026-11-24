@@ -47,7 +47,7 @@ def user_id():
     if os.getenv('JELLYFIN_USER_ID'):
         return os.environ['JELLYFIN_USER_ID']
     sessions = api('/Sessions')
-    prefer = os.getenv('JELLYFIN_TV', '[TV] Geoffs TV')
+    prefer = os.getenv('JELLYFIN_TV')
     for s in sorted(sessions, key=lambda s: s.get('DeviceName') != prefer):
         if s.get('UserId'):
             return s['UserId']
