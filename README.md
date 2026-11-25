@@ -256,3 +256,7 @@ The utility takes the queue lock, skips symlinks and only recognizes specific WA
 The queue probes the authenticated media source using ffprobe and checks the decoded mono 16 kHz PCM before loading the transcription model. Missing audio streams or empty decoded audio are recorded as `no_audio`; exact digital silence is recorded as `silent_audio`. Quiet nonzero samples are not discarded. Audible silence can contain nonzero samples (for example analog noise), so some apparently silent films still proceed to transcription and diarization.
 
 `no_speech` means Whisper produced no usable cues. `no_speaker_turns` means diarization found no eligible turns; it does not prove the media is silent. Neither outcome publishes an SRT. Actual probing, model, authentication, decoding and subprocess errors remain `failed`. The queue's `status` and `scan` show these outcomes; ordinary runs skip them and `--retry-failed` explicitly retries them as well as failures. Existing database rows are not automatically reclassified. The scan's remaining estimate includes items without completed subtitles, including skipped outcomes.
+
+## License
+
+MIT; see [LICENSE](LICENSE).
