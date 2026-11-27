@@ -100,6 +100,27 @@ def update(db, item, state, dest=None, captions=None, error=None, attempt=False)
     db.commit()
 
 
+def item_matches_filters(item, args):
+    """Match Jellyfin items using title, path, season, and episode selectors."""
+    if args.title:
+        needle = args.title.casefold()
+        names = (item.get('Name') or '', item.get('SeriesName') or '')
+        if not any(needle in name.casefold() for name in names):
+            return False
+    if args.path:
+        needle = args.path.replace('\\', '/').casefold()
+        media_path = (item.get('Path') or '').replace('\\', '/').casefold()
+        if needle not in media_path:
+            return False
+    if args.season is not None:
+        if item.get('Type') != 'Episode' or item.get('ParentIndexNumber') != args.season:
+            return False
+    if args.episode is not None:
+        if item.get('Type') != 'Episode' or item.get('IndexNumber') != args.episode:
+            return False
+    return True
+
+
 def show_status(db):
     print(f'Queue database: {DB}')
     for row in db.execute('SELECT state,COUNT(*) AS n FROM jobs GROUP BY state ORDER BY state'):
@@ -118,12 +139,22 @@ def main():
     limit.add_argument('--limit', type=int, default=None, help='Max videos to process this run (default: 3)')
     limit.add_argument('--all', action='store_true', help='Process all eligible videos; resumable')
     p.add_argument('--retry-failed', action='store_true', help='Reattempt failed and non-speech/audio outcomes')
+    p.add_argument('--title', help='Case-insensitive substring of movie/episode title or series name')
+    p.add_argument('--path', help='Case-insensitive substring of the Jellyfin media path')
+    p.add_argument('--season', type=int, help='Match this Jellyfin season number (episodes only)')
+    p.add_argument('--episode', type=int, help='Match this Jellyfin episode number (requires --season)')
     p.add_argument('--device', choices=['cuda', 'cpu'], default='cuda')
     p.add_argument('--chunk-seconds', type=int, default=30)
     p.add_argument('--overlap', type=float, default=3)
     args = p.parse_args()
     if args.limit is not None and args.limit < 1:
         p.error('--limit must be >= 1')
+    if args.season is not None and args.season < 0:
+        p.error('--season must be >= 0')
+    if args.episode is not None and args.episode < 1:
+        p.error('--episode must be >= 1')
+    if args.episode is not None and args.season is None:
+        p.error('--episode requires --season to identify the season unambiguously')
     if args.chunk_seconds < 20 or not 0 <= args.overlap <= 10:
         p.error('Invalid chunk/overlap')
     OUT.mkdir(parents=True, exist_ok=True)
@@ -141,11 +172,18 @@ def main():
                 p.error('Missing Jellyfin API token in .env')
             print('Scanning Jellyfin inventory...', flush=True)
             items = list(batch.inventory(batch.user_id()))
+            filters_active = bool(args.title or args.path) or args.season is not None or args.episode is not None
+            if filters_active:
+                items = [item for item in items if item_matches_filters(item, args)]
+                print(f'Inventory matches filters: {len(items)}', flush=True)
             eligible = sorted(
                 (i for i in items if not batch.english_text_present(i)),
                 key=item_sort_key,
             )
             print(f'{len(items)} videos; {len(eligible)} potentially missing English text subtitles.', flush=True)
+            if filters_active and not items:
+                print('No Jellyfin items matched the requested filters.', flush=True)
+                return
             if args.action == 'scan':
                 complete = 0
                 failed = 0
