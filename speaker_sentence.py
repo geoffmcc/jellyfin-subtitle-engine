@@ -40,14 +40,19 @@ def classify_boundary(prev_text, next_text, left_words, right_words, gap, near_t
     end_sentence = bool(PUNCT.search(prev_text))
     short_reply = bool(REPLY.fullmatch(prev_text.strip()))
     next_reply = bool(re.match(r'(?i)^(?:no|yes|nah|yeah|nope|what|fuck|oh|wait|stop)\b', next_text.strip()))
+    # A diarization transition aligned with adjacent word timestamps is stronger
+    # than punctuation. Short replies are often unpunctuated (what/yeah/no).
+    if near_turn:
+        if -.18 <= gap <= 1.10 and left_words >= 1 and right_words >= 1:
+            return 5
+        return None
+    # Without a turn transition, require a genuine pause for short acknowledgements.
+    if short_reply and gap >= .08:
+        return 4
+    if next_reply and gap >= .12:
+        return 3
     if not end_sentence:
         return None
-    # Two full sentences in one original cue: allow a split when their
-    # timing or wording suggests a conversation boundary.
-    if near_turn:
-        return 5
-    if short_reply or next_reply:
-        return 4
     if gap >= .12:
         return 3
     if gap >= .04 and left_words >= 3 and right_words >= 2:
