@@ -108,8 +108,8 @@ def item_matches_filters(item, args):
         if not any(needle in name.casefold() for name in names):
             return False
     if args.path:
-        needle = args.path.replace('\\\\', '/').casefold()
-        media_path = (item.get('Path') or '').replace('\\\\', '/').casefold()
+        needle = args.path.replace('\\', '/').casefold()
+        media_path = (item.get('Path') or '').replace('\\', '/').casefold()
         if needle not in media_path:
             return False
     if args.season is not None:
