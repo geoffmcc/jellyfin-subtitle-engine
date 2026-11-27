@@ -21,7 +21,7 @@ class QueueFilterTests(unittest.TestCase):
             "Type": "Episode",
             "Name": "The Dollhouse",
             "SeriesName": "Yellowjackets",
-            "Path": r"X:\\TV\\Yellowjackets\\Season 02\\Yellowjackets S02E04.mkv",
+            "Path": r"X:\TV\Yellowjackets\Season 02\Yellowjackets S02E04.mkv",
             "ParentIndexNumber": 2,
             "IndexNumber": 4,
         }
