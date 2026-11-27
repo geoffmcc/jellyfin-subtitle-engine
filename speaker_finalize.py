@@ -81,6 +81,16 @@ def media_path(server_path):
         raise FileNotFoundError(video)
     return video, sidecar
 
+def serialize_speaker_turns(annotation, min_duration=0.12):
+    """Keep brief real utterances for boundary detection; discard tiny noise."""
+    turns=[]
+    for turn, _, speaker in annotation.itertracks(yield_label=True):
+        start,end=float(turn.start),float(turn.end)
+        if end-start >= min_duration:
+            turns.append({'start':start,'end':end,'speaker':str(speaker)})
+    return turns
+
+
 def get_speakers(video,folder):
     speakers=folder/'speakers.json'
     if speakers.exists():
@@ -98,9 +108,7 @@ def get_speakers(video,folder):
         pipeline=Pipeline.from_pretrained('pyannote/speaker-diarization-community-1',token=token)
         pipeline.to(torch.device('cuda'))
         result=pipeline(str(wav))
-        turns=[{'start':float(t.start),'end':float(t.end),'speaker':str(s)}
-               for t,_,s in result.exclusive_speaker_diarization.itertracks(yield_label=True)
-               if t.end-t.start>=.3]
+        turns=serialize_speaker_turns(result.exclusive_speaker_diarization)
         if not turns: raise NoSpeakerTurns('No speech turns detected')
         with speakers.open('x',encoding='utf-8') as f:json.dump(turns,f)
         return turns
